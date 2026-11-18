@@ -1,0 +1,45 @@
+# StackRails governance for GitLab merge requests (124hhvu6zh4). Include it at a pinned tag; setup: ci/README.md.
+
+variables:
+  STACKRAILS_URL: https://app.stackrails.ai
+  STACKRAILS_CHECK_REF: main
+  STACKRAILS_CHECK_SCRIPT_URL: https://raw.githubusercontent.com/StackRailsAI/stackrails-actions/${STACKRAILS_CHECK_REF}/actions/pr-check/stackrails_check.py
+  STACKRAILS_CHECK_SHA256: ""
+  STACKRAILS_FAIL_OPEN: "true"
+  STACKRAILS_TIMEOUT: "600"
+  STACKRAILS_CHECK_IMAGE: python:3.13
+
+.stackrails-check:
+  image: ${STACKRAILS_CHECK_IMAGE}
+  variables:
+    GIT_DEPTH: "0"
+  before_script:
+    - curl -fsSL --retry 3 -o /tmp/stackrails_check.py "$STACKRAILS_CHECK_SCRIPT_URL"
+    - if [ -n "$STACKRAILS_CHECK_SHA256" ]; then echo "$STACKRAILS_CHECK_SHA256  /tmp/stackrails_check.py" | sha256sum -c -; fi
+    - if [ "$STACKRAILS_FAIL_OPEN" = "false" ]; then export FAIL_OPEN_FLAG=--no-fail-open; else export FAIL_OPEN_FLAG=--fail-open; fi
+
+stackrails-governance:
+  extends: .stackrails-check
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - git fetch --no-tags --quiet origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" || true
+    - >-
+      python3 /tmp/stackrails_check.py --host gitlab --url "$STACKRAILS_URL" --timeout "$STACKRAILS_TIMEOUT"
+      "$FAIL_OPEN_FLAG" --codequality-file gl-code-quality-report.json
+  artifacts:
+    when: always
+    reports:
+      codequality: gl-code-quality-report.json
+
+# Merge credit: needs a read_api token to find the merge request of the default-branch commit.
+stackrails-merge-credit:
+  extends: .stackrails-check
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STACKRAILS_GITLAB_TOKEN
+  variables:
+    GIT_DEPTH: "1"
+  script:
+    - python3 /tmp/stackrails_check.py --host gitlab --gitlab-merged --url "$STACKRAILS_URL" "$FAIL_OPEN_FLAG"
