@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# StackRails governance as a server-side pre-receive hook: rejects a push the verdict blocks (advisory pre_push).
+# Environment and install: ci/README.md "Plain git server".
+set -uo pipefail
+
+script="${STACKRAILS_CHECK_SCRIPT:?set STACKRAILS_CHECK_SCRIPT to the path of stackrails_check.py}"
+url="${STACKRAILS_URL:?set STACKRAILS_URL}"
+: "${STACKRAILS_SERVICE_KEY:?set STACKRAILS_SERVICE_KEY in the server environment}"
+repository="${STACKRAILS_REPOSITORY:-$(basename "$(pwd)" .git)}"
+refs="${STACKRAILS_REFS:-^refs/heads/}"
+fail_open=--fail-open
+[[ "${STACKRAILS_FAIL_OPEN:-true}" == false ]] && fail_open=--no-fail-open
+zero=0000000000000000000000000000000000000000
+default_tip="$(git rev-parse -q --verify HEAD 2>/dev/null || true)"
+
+status=0
+while read -r old new ref; do
+  [[ "$new" == "$zero" || ! "$ref" =~ $refs ]] && continue
+  base="$old"
+  if [[ "$old" == "$zero" ]]; then
+    # A new branch is compared with the default branch; with none yet there is nothing to compare.
+    [[ -z "$default_tip" || "$default_tip" == "$new" ]] && continue
+    base="$default_tip"
+  fi
+  echo "StackRails governance: checking $ref"
+  python3 "$script" --kind pre_push --url "$url" --repository "$repository" --base "$base" --head "$new" \
+    --timeout "${STACKRAILS_TIMEOUT:-120}" "$fail_open" || status=1
+done
+[[ "$status" -ne 0 ]] && echo "StackRails governance blocked this push; fix the findings above and push again."
+exit "$status"

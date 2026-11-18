@@ -1,0 +1,91 @@
+name: StackRails governance
+description: >
+  Send this pull request's diff to StackRails with a service key, wait for the governance verdict, and post it here as
+  the `StackRails governance` check run and one PR comment, with this workflow's own token. StackRails holds no
+  permission on the repository and posts nothing; a blocking verdict fails this step.
+author: StackRails
+
+inputs:
+  stackrails-url:
+    description: The StackRails portal, e.g. https://app.stackrails.ai (staging https://app.stage.stackrails.ai).
+    required: true
+  service-key:
+    description: An `sr_live_` StackRails service key, from a secret. Empty on fork pull requests (finishes neutral).
+    required: true
+  fail-open:
+    description: "`true`: StackRails down, slow or unreachable finishes neutral. `false`: it fails the step."
+    required: false
+    default: "true"
+  timeout:
+    description: Seconds to wait for the verdict.
+    required: false
+    default: "600"
+  repository:
+    description: The repository as StackRails knows it. Defaults to this repository's URL.
+    required: false
+    default: ""
+  github-token:
+    description: "Token that posts the check run and the comment (`checks: write`, `pull-requests: write`)."
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  state:
+    description: "`success`, `neutral` or `failure`."
+    value: ${{ steps.check.outputs.state }}
+  blocking:
+    description: Blocking findings the change introduces.
+    value: ${{ steps.check.outputs.blocking }}
+  report-id:
+    description: The StackRails PR report id, when one was recorded.
+    value: ${{ steps.check.outputs.report-id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch the commits to compare
+      if: >-
+        github.event_name == 'merge_group' ||
+        (startsWith(github.event_name, 'pull_request') && github.event.action != 'closed')
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+      run: |
+        set -euo pipefail
+        unshallow=()
+        [[ "$(git rev-parse --is-shallow-repository)" == true ]] && unshallow=(--unshallow)
+        git fetch --no-tags --quiet "${unshallow[@]}" origin "$BASE_SHA" "$HEAD_SHA" \
+          || echo "::warning::could not fetch $BASE_SHA and $HEAD_SHA; check out with fetch-depth: 0"
+
+    - name: StackRails governance
+      id: check
+      shell: bash
+      env:
+        STACKRAILS_SERVICE_KEY: ${{ inputs.service-key }}
+        STACKRAILS_GITHUB_TOKEN: ${{ inputs.github-token }}
+        URL: ${{ inputs.stackrails-url }}
+        FAIL_OPEN: ${{ inputs.fail-open }}
+        TIMEOUT: ${{ inputs.timeout }}
+        REPOSITORY: ${{ inputs.repository }}
+      run: |
+        set -uo pipefail
+        [[ "$FAIL_OPEN" == true || "$FAIL_OPEN" == false ]] || { echo "::error::fail-open must be true or false"; exit 1; }
+        [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || { echo "::error::timeout must be a number of seconds"; exit 1; }
+        result="$RUNNER_TEMP/stackrails-check.json"
+        flags=(--fail-open)
+        [[ "$FAIL_OPEN" == false ]] && flags=(--no-fail-open)
+        [[ -n "$REPOSITORY" ]] && flags+=(--repository "$REPOSITORY")
+        python3 "$GITHUB_ACTION_PATH/stackrails_check.py" --host github --url "$URL" --timeout "$TIMEOUT" \
+          --github-check --summary-file "$GITHUB_STEP_SUMMARY" --result-file "$result" "${flags[@]}"
+        code=$?
+        if [[ -f "$result" ]]; then
+          python3 - "$result" >> "$GITHUB_OUTPUT" <<'PY'
+        import json, re, sys
+        r = json.load(open(sys.argv[1], encoding="utf-8"))
+        print(f"state={r['state']}")
+        print(f"blocking={int(r['blocking'])}")
+        print("report-id=" + re.sub(r"[^A-Za-z0-9:_-]", "", str(r["report_id"] or "")))
+        PY
+        fi
+        exit "$code"
