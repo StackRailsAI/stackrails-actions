@@ -390,6 +390,12 @@ def md(value: object) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace("@", "@​")
 
 
+def md_lines(value: object) -> list[str]:
+    """Multi-line reply text, each line inert; table rows are dropped, as the findings table below repeats them."""
+    raw = str(value if value is not None else "").splitlines()
+    return [line for line in (md(r) for r in raw if not r.lstrip().startswith("|")) if line]
+
+
 def describe(item: object) -> str:
     if isinstance(item, dict):
         for key in ("policy", "name", "path", "component", "id"):
@@ -441,7 +447,7 @@ def render_verdict(reply: dict, not_covered: list[tuple[str, str]]) -> Outcome:
     )
     lines = [f"### {CHECK_NAME}: {state}", "", f"**{md(title)}**", ""]
     if reply.get("summary"):
-        lines += [md(reply["summary"]), ""]
+        lines += [*md_lines(reply["summary"]), ""]
     if reply.get("restricted"):
         lines += [f"Finding details are withheld: {md(reply['restricted'])}", ""]
     if introduced:
