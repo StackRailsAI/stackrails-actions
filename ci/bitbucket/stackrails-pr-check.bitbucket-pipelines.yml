@@ -1,4 +1,4 @@
-# StackRails governance for Bitbucket Cloud pull requests (124hhvu6zh5): merge this into your bitbucket-pipelines.yml.
+# StackRails governance for Bitbucket Cloud (124hhvu6zh5): merge both steps into your bitbucket-pipelines.yml.
 # STACKRAILS_SERVICE_KEY is a secured repository variable; setup and pinning: ci/README.md.
 
 definitions:
@@ -17,8 +17,22 @@ definitions:
           - if [ "${STACKRAILS_FAIL_OPEN:-true}" = "false" ]; then FAIL_OPEN_FLAG=--no-fail-open; else FAIL_OPEN_FLAG=--fail-open; fi
           # The report goes to Code Insights through the pipeline's own auth proxy (localhost:29418); no token.
           - python3 /tmp/stackrails_check.py --host bitbucket --url "$STACKRAILS_URL" "$FAIL_OPEN_FLAG" --bitbucket-report
+    # Every update of the default branch refreshes the StackRails graph; pipelines have no merge trigger.
+    - step: &stackrails-default-branch-push
+        name: StackRails default branch push
+        image: python:3.13
+        script:
+          - export STACKRAILS_URL="${STACKRAILS_URL:-https://app.stackrails.ai}"
+          - export STACKRAILS_CHECK_REF="${STACKRAILS_CHECK_REF:-main}"
+          - curl -fsSL --retry 3 -o /tmp/stackrails_check.py "https://raw.githubusercontent.com/StackRailsAI/stackrails-actions/${STACKRAILS_CHECK_REF}/actions/pr-check/stackrails_check.py"
+          - if [ -n "${STACKRAILS_CHECK_SHA256:-}" ]; then echo "$STACKRAILS_CHECK_SHA256  /tmp/stackrails_check.py" | sha256sum -c -; fi
+          - if [ "${STACKRAILS_FAIL_OPEN:-true}" = "false" ]; then FAIL_OPEN_FLAG=--no-fail-open; else FAIL_OPEN_FLAG=--fail-open; fi
+          - python3 /tmp/stackrails_check.py --host bitbucket --url "$STACKRAILS_URL" "$FAIL_OPEN_FLAG"
 
 pipelines:
   pull-requests:
     '**':
       - step: *stackrails-governance
+  branches:
+    main: # your default branch
+      - step: *stackrails-default-branch-push

@@ -33,7 +33,18 @@ stackrails-governance:
     reports:
       codequality: gl-code-quality-report.json
 
-# Merge credit: needs a read_api token to find the merge request of the default-branch commit.
+# Every push to the default branch (a merge, a direct push or a merge train) refreshes the graph; no token.
+stackrails-default-branch-push:
+  extends: .stackrails-check
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    GIT_DEPTH: "1"
+  script:
+    - python3 /tmp/stackrails_check.py --host gitlab --url "$STACKRAILS_URL" "$FAIL_OPEN_FLAG"
+
+# Merge credit (optional): needs a read_api token to find the merge request of the default-branch commit.
 stackrails-merge-credit:
   extends: .stackrails-check
   stage: test

@@ -33,10 +33,12 @@ MAX_FILE_CHARS = 400_000
 MAX_TOTAL_CHARS = 2_000_000
 MAX_WAIT_SECONDS = 25
 MAX_ROWS = 50
-KINDS = ("pr_updated", "pr_merged", "pr_closed", "pre_push", "pre_merge")
+KINDS = ("pr_updated", "pr_merged", "pr_closed", "pre_push", "pre_merge", "default_branch_push")
+PR_KINDS = ("pr_updated", "pr_merged", "pr_closed")
 WITH_CHANGES = ("pr_updated", "pre_push", "pre_merge")
 ADVISORY = ("pre_push", "pre_merge")
 ZERO_SHA = "0" * 40
+SHA = re.compile(r"[0-9a-f]{40}")
 USER_AGENT = "stackrails-pr-check/1"
 
 # The contract's credential-looking names; they are dropped before anything is read.
@@ -191,6 +193,7 @@ class Context:
     author: str | None = None
     fork: bool = False
     report_sha: str | None = None  # the commit the host's check / report is attached to
+    scm_repository_id: str | None = None  # the host's immutable id: survives a rename or transfer
     skip: str | None = None  # an event this script has nothing to send for
 
 
@@ -201,12 +204,15 @@ def github_context(event_name: str, event: dict, env: dict) -> Context:
     repo = event.get("repository") or {}
     server = env.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
     repository = f"{server}/{repo.get('full_name') or env.get('GITHUB_REPOSITORY', '')}"
+    external_id = str(repo.get("id") or env.get("GITHUB_REPOSITORY_ID") or "") or None
+    if event_name == "push":
+        return github_push_context(event, repository, external_id)
     if event_name == "merge_group":
         group = event.get("merge_group") or {}
         head = group.get("head_sha")
         return Context(kind="pre_merge", repository=repository, base=group.get("base_sha"), head=head, report_sha=head)
     if event_name not in ("pull_request", "pull_request_target"):
-        return Context(skip=f"the {event_name} event has nothing to check: run on pull_request or merge_group")
+        return Context(skip=f"the {event_name} event has nothing to send: run on pull_request, merge_group or push")
     pr = event.get("pull_request") or {}
     head_repo = (pr.get("head") or {}).get("repo") or {}
     ctx = Context(
@@ -217,6 +223,7 @@ def github_context(event_name: str, event: dict, env: dict) -> Context:
         author=(pr.get("user") or {}).get("login"),
         head=(pr.get("head") or {}).get("sha"),
         fork=head_repo.get("full_name") != repo.get("full_name"),
+        scm_repository_id=external_id,
     )
     action = event.get("action")
     if action == "closed":
@@ -232,9 +239,29 @@ def github_context(event_name: str, event: dict, env: dict) -> Context:
     return ctx
 
 
+def github_push_context(event: dict, repository: str, external_id: str | None) -> Context:
+    """A push to the default branch (a direct push, a merged PR or a merge queue landing) is ``default_branch_push``."""
+    repo = event.get("repository") or {}
+    ref, default = str(event.get("ref") or ""), repo.get("default_branch")
+    if not default or ref != f"refs/heads/{default}":
+        return Context(skip=f"{ref or 'this push'} is not the default branch: only its updates are sent")
+    head = event.get("after")
+    if event.get("deleted") or not head or head == ZERO_SHA:
+        return Context(skip="the push deleted the branch: nothing to send")
+    return Context(kind="default_branch_push", repository=repository, head=head, scm_repository_id=external_id)
+
+
 def gitlab_context(env: dict) -> Context:
-    if env.get("CI_PIPELINE_SOURCE") != "merge_request_event":
-        return Context(skip="not a merge request pipeline: the job runs on merge_request_event")
+    source, branch = env.get("CI_PIPELINE_SOURCE"), env.get("CI_COMMIT_BRANCH")
+    if source == "push" and branch and branch == env.get("CI_DEFAULT_BRANCH"):
+        return Context(
+            kind="default_branch_push",
+            repository=env.get("CI_PROJECT_URL"),
+            head=env.get("CI_COMMIT_SHA"),
+            scm_repository_id=env.get("CI_PROJECT_ID") or None,
+        )
+    if source != "merge_request_event":
+        return Context(skip="not a merge request pipeline or a default-branch push: nothing to send")
     iid = env.get("CI_MERGE_REQUEST_IID")
     project_url = env.get("CI_PROJECT_URL", "")
     target = env.get("CI_MERGE_REQUEST_TARGET_BRANCH_NAME")
@@ -250,6 +277,7 @@ def gitlab_context(env: dict) -> Context:
         pr_title=env.get("CI_MERGE_REQUEST_TITLE"),
         author=env.get("GITLAB_USER_LOGIN"),
         fork=bool(source_project) and source_project != env.get("CI_MERGE_REQUEST_PROJECT_ID"),
+        scm_repository_id=env.get("CI_MERGE_REQUEST_PROJECT_ID") or env.get("CI_PROJECT_ID") or None,
     )
 
 
@@ -269,14 +297,24 @@ def gitlab_merged_context(env: dict, merge_requests: list[dict]) -> Context:
         pr_url=mr.get("web_url"),
         pr_title=mr.get("title"),
         author=(mr.get("author") or {}).get("username"),
+        scm_repository_id=env.get("CI_PROJECT_ID") or None,
     )
 
 
 def bitbucket_context(env: dict) -> Context:
     pr_id = env.get("BITBUCKET_PR_ID")
-    if not pr_id:
-        return Context(skip="not a pull-request pipeline: put the step under pipelines: pull-requests:")
     origin = env.get("BITBUCKET_GIT_HTTP_ORIGIN", "")
+    # Without braces, as the portal's repository picker records it.
+    external_id = (env.get("BITBUCKET_REPO_UUID") or "").strip("{}") or None
+    if not pr_id and env.get("BITBUCKET_BRANCH"):
+        return Context(
+            kind="default_branch_push",
+            repository=origin,
+            head=env.get("BITBUCKET_COMMIT"),
+            scm_repository_id=external_id,
+        )
+    if not pr_id:
+        return Context(skip="not a pull-request or branch pipeline: nothing to send")
     dest = env.get("BITBUCKET_PR_DESTINATION_BRANCH")
     head = env.get("BITBUCKET_COMMIT")
     return Context(
@@ -287,6 +325,7 @@ def bitbucket_context(env: dict) -> Context:
         pr_number=int(pr_id),
         pr_url=f"{origin}/pull-requests/{pr_id}" if origin else None,
         report_sha=head,
+        scm_repository_id=external_id,
     )
 
 
@@ -483,7 +522,11 @@ def render_verdict(reply: dict, not_covered: list[tuple[str, str]]) -> Outcome:
 
 
 def render_record(kind: str, reply: dict) -> Outcome:
-    if kind == "pr_merged":
+    if kind == "default_branch_push":
+        keys = ("refresh", "reason", "follow_up")
+        parts = [f"{k.replace('_', ' ')}: {reply.get(k)}" for k in keys if reply.get(k) is not None]
+        title = "Default branch update sent"
+    elif kind == "pr_merged":
         parts = [f"{k.replace('_', ' ')}: {reply.get(k)}" for k in ("credited", "candidates", "skipped", "excepted")]
         title = "Merge credit recorded"
     else:
@@ -692,9 +735,11 @@ def bitbucket_report(outcome: Outcome, env: dict, proxy: str) -> None:
 
 def build_body(ctx: Context, changes: list[dict] | None) -> dict:
     body: dict = {"kind": ctx.kind, "repository": ctx.repository}
-    if ctx.kind in ("pr_updated", "pr_merged", "pr_closed"):
+    if ctx.scm_repository_id:
+        body["scm_repository_id"] = ctx.scm_repository_id
+    if ctx.kind in PR_KINDS:
         body["pr_number"] = ctx.pr_number
-    if ctx.kind in ("pr_updated", "pr_merged") and ctx.head:
+    if ctx.kind in ("pr_updated", "pr_merged", "default_branch_push") and ctx.head:
         body["head_sha"] = ctx.head
     if ctx.kind == "pr_merged" and ctx.merge_commit_sha:
         body["merge_commit_sha"] = ctx.merge_commit_sha
@@ -721,8 +766,13 @@ def evaluate(ctx: Context, args: argparse.Namespace, key: str, sleep=time.sleep,
         raise ConfigError(f"kind must be one of {', '.join(KINDS)}")
     if not ctx.repository:
         raise ConfigError("no repository: pass --repository")
-    if ctx.kind not in ADVISORY and ctx.pr_number is None:
+    if ctx.kind in PR_KINDS and ctx.pr_number is None:
         raise ConfigError(f"{ctx.kind} needs --pr-number")
+    if ctx.kind == "default_branch_push":
+        if not ctx.head:
+            raise ConfigError("default_branch_push needs --head")
+        if not SHA.fullmatch(ctx.head):
+            ctx.head = _git(["rev-parse", "--verify", f"{ctx.head}^{{commit}}"]).decode().strip()
     not_covered: list[tuple[str, str]] = []
     changes = None
     if ctx.kind in WITH_CHANGES:
@@ -776,7 +826,8 @@ def host_context(args: argparse.Namespace, env: dict) -> Context:
         ctx = bitbucket_context(env)
     else:
         ctx = Context()
-    for key in ("kind", "repository", "base", "head", "pr_number", "merge_commit_sha", "pr_url", "pr_title", "author"):
+    keys = ("kind", "repository", "base", "head", "pr_number", "merge_commit_sha", "pr_url", "pr_title", "author")
+    for key in (*keys, "scm_repository_id"):
         if getattr(args, key) is not None:
             setattr(ctx, key, getattr(args, key))
     return ctx
@@ -795,6 +846,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--pr-url")
     p.add_argument("--pr-title")
     p.add_argument("--author")
+    p.add_argument("--scm-repository-id", help="the host's immutable repository id, when known")
     p.add_argument("--fail-open", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--timeout", type=float, default=600)
     p.add_argument("--poll-interval", type=float, default=5)

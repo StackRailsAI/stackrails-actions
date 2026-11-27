@@ -2,7 +2,8 @@ name: StackRails governance
 description: >
   Send this pull request's diff to StackRails with a service key, wait for the governance verdict, and post it here as
   the `StackRails governance` check run and one PR comment, with this workflow's own token. StackRails holds no
-  permission on the repository and posts nothing; a blocking verdict fails this step.
+  permission on the repository and posts nothing; a blocking verdict fails this step. On a push to the default branch it
+  sends the new head commit so StackRails refreshes its graph.
 author: StackRails
 
 inputs:
