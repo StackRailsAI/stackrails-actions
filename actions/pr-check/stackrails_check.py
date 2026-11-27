@@ -191,6 +191,7 @@ class Context:
     pr_url: str | None = None
     pr_title: str | None = None
     author: str | None = None
+    head_ref: str | None = None  # the PR's source branch: StackRails links work recorded on it to this PR
     fork: bool = False
     report_sha: str | None = None  # the commit the host's check / report is attached to
     scm_repository_id: str | None = None  # the host's immutable id: survives a rename or transfer
@@ -222,6 +223,7 @@ def github_context(event_name: str, event: dict, env: dict) -> Context:
         pr_title=pr.get("title"),
         author=(pr.get("user") or {}).get("login"),
         head=(pr.get("head") or {}).get("sha"),
+        head_ref=(pr.get("head") or {}).get("ref"),
         fork=head_repo.get("full_name") != repo.get("full_name"),
         scm_repository_id=external_id,
     )
@@ -276,6 +278,7 @@ def gitlab_context(env: dict) -> Context:
         pr_url=f"{project_url}/-/merge_requests/{iid}" if iid else None,
         pr_title=env.get("CI_MERGE_REQUEST_TITLE"),
         author=env.get("GITLAB_USER_LOGIN"),
+        head_ref=env.get("CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"),
         fork=bool(source_project) and source_project != env.get("CI_MERGE_REQUEST_PROJECT_ID"),
         scm_repository_id=env.get("CI_MERGE_REQUEST_PROJECT_ID") or env.get("CI_PROJECT_ID") or None,
     )
@@ -297,6 +300,7 @@ def gitlab_merged_context(env: dict, merge_requests: list[dict]) -> Context:
         pr_url=mr.get("web_url"),
         pr_title=mr.get("title"),
         author=(mr.get("author") or {}).get("username"),
+        head_ref=mr.get("source_branch"),
         scm_repository_id=env.get("CI_PROJECT_ID") or None,
     )
 
@@ -324,6 +328,8 @@ def bitbucket_context(env: dict) -> Context:
         head=head,
         pr_number=int(pr_id),
         pr_url=f"{origin}/pull-requests/{pr_id}" if origin else None,
+        # On a pull-request pipeline BITBUCKET_BRANCH is the source branch.
+        head_ref=env.get("BITBUCKET_BRANCH"),
         report_sha=head,
         scm_repository_id=external_id,
     )
@@ -741,6 +747,9 @@ def build_body(ctx: Context, changes: list[dict] | None) -> dict:
         body["pr_number"] = ctx.pr_number
     if ctx.kind in ("pr_updated", "pr_merged", "default_branch_push") and ctx.head:
         body["head_sha"] = ctx.head
+    # A fork's branch names another repository's branch, so it links nothing here.
+    if ctx.kind in PR_KINDS and ctx.head_ref and not ctx.fork:
+        body["head_ref"] = ctx.head_ref
     if ctx.kind == "pr_merged" and ctx.merge_commit_sha:
         body["merge_commit_sha"] = ctx.merge_commit_sha
     for key in ("pr_url", "pr_title", "author"):
@@ -826,7 +835,8 @@ def host_context(args: argparse.Namespace, env: dict) -> Context:
         ctx = bitbucket_context(env)
     else:
         ctx = Context()
-    keys = ("kind", "repository", "base", "head", "pr_number", "merge_commit_sha", "pr_url", "pr_title", "author")
+    keys = ("kind", "repository", "base", "head", "head_ref", "pr_number", "merge_commit_sha", "pr_url", "pr_title")
+    keys = (*keys, "author")
     for key in (*keys, "scm_repository_id"):
         if getattr(args, key) is not None:
             setattr(ctx, key, getattr(args, key))
@@ -841,6 +851,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--repository")
     p.add_argument("--base", help="base ref or sha; the merge base with --head is computed")
     p.add_argument("--head")
+    p.add_argument("--head-ref", help="the PR's source branch")
     p.add_argument("--pr-number", type=int)
     p.add_argument("--merge-commit-sha")
     p.add_argument("--pr-url")

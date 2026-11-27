@@ -11,6 +11,8 @@ Every host runs the same standard-library script, [`actions/pr-check/stackrails_
    Files with credential-looking names (`.env*`, `*.pem`, `id_rsa*`, `service-account*.json`, ...) are never read or
    sent. Binary files and files over 400,000 characters are left out and named as not covered. Over 200 files, nothing
    is sent and the check finishes neutral ("too many files").
+   A PR event also names its source branch (`head_ref`, never a fork's), so StackRails can link work recorded on
+   that branch to the PR.
 2. polls the job every 5 s for up to 10 minutes (`--timeout`);
 3. writes a markdown summary (blocking findings first) to the job log and the host's report surface;
 4. exits 1 only on a `failure` verdict (a block-severity finding the change introduces) or a misconfiguration
