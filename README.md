@@ -7,3 +7,5 @@ posts the verdict itself.
 Setup for every host: [`ci/README.md`](ci/README.md). Pin a release tag, never `main`.
 
 This repository is published from StackRails releases; changes made here are overwritten.
+
+Licensed under the Apache License, Version 2.0: see [`LICENSE`](LICENSE).
